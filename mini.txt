@@ -1,4 +1,5 @@
-# Copyright (c) Microsoft Corporation. 
+benchmak_utils.py
+"# Copyright (c) Microsoft Corporation. 
 # Licensed under the MIT license. 
 
 import os
@@ -114,7 +115,7 @@ def get_topic_durations(df_c, topic_list):
     gt_topics_ordered = {x: gt_topics[x] for x in topic_list}
     return gt_topics_ordered
 
-def process_section(list_prompt, df_mdata, source, meeting, section_s=[300, 600], min_n_words=750):
+def process_section(list_prompt, df_mdata, source, meeting, section_s=[150,300], min_n_words=150):
     '''
     Process each section of the meeting data and generate prompts based on the specified criteria.
     Parameters:
@@ -385,8 +386,9 @@ def get_raw_completions(completion_path):
     Returns:
         dict: A dictionary containing the responses for each prompt.
     '''
-    with open(completion_path, 'r', encoding='utf-8') as llm_file:
-        return [json.loads(line) for line in llm_file if line.strip()]
+    with open(completion_path, 'r') as llm_file:
+        all_responses = json.load(llm_file)
+    return all_responses
 
 def join_results(df_gt, df_model, fname, output_dir):
     '''
@@ -486,3 +488,191 @@ def display_metrics(metrics, metrics_binary, title='', binary_only=True):
         print(df_metrics.to_string())
     print(df_metrics_binary.to_string())
 
+"
+
+example_data_to_prompts_to_results.ipynb
+"_Copyright (c) Microsoft Corporation._
+
+_Licensed under the MIT license._
+
+
+# Example - from TCR Data to Prompts to Analysis Results
+
+---
+
+This scrip helps reproduce the results in the TCR paper by performing the following steps:
+* Create Prompts
+* (Not included) Run the Prompts
+* Parse the responses
+* Analyze the results as a binary classification problem and focus on the "not discussed" class.
+from utils.benchmark_utils import *
+## Create Prompts
+
+In this section, we convert the TCR data to prompts with predefined prompt template by different snippet length. Except for the prompt template, the settings are the same as the benchmark experiments in the TCR paper.
+
+* [**REQUIRED**] To update the prompt template, please overwrite the `prompt_topic_relevance` function by updating the cell below. Currently it is just a placeholder without actual prompt requests.
+
+* To change other settings, please modify cuntions in `benchmark_utils.py`.
+# ========================================================================================================
+# Overwrite the following functions with your own implementation
+# ========================================================================================================
+
+def prompt_topic_relevance(str_trans, str_topics, len_topics, quotes_style=''):
+    '''
+    Generate a prompt based on the template and inputs to determine the relevance of topics in a conversation transcript.
+    Parameters:
+        str_trans (str): The conversation transcript.
+        str_topics (str): The list of topics being discussed.
+        len_topics (int): The length of the topic list.
+        quotes_style (str): Optional. Specifies the style of quotes to unify. Valid values are "single", "double", or an empty string. Default is an empty string.
+    Returns:
+        str: The generated prompt.
+    '''
+    prompt_template = '''HERE IS THE PROMPT TEMPATE THAT TAKES THE FOLLOWING INPUTS: {input_trans}, {input_topics}, {len_topics}. '''
+    prompt_template = prompt_template.replace('\n    ', '\n')
+    str_trans = unify_quotes(str_trans, style=quotes_style)
+    str_prompt = prompt_template.format(input_trans=str_trans, input_topics=str_topics, len_topics=len_topics)
+    return str_prompt
+
+# Inputs (Folder that inlcudes the json files in the TCR data format)
+input_folder = 'data\example_aug'
+
+# Outputs (Folder to save the generated prompts in json format)
+output_folder = 'tmp\prompts'
+prep_folder(output_folder)
+    
+# Generate prompts
+t_pfiles = [x for x in locate_suffix_files(input_folder, suffix='json')]
+list_prompt = generate_relevance_prompts(t_pfiles)
+
+# Write to json: one json per Line
+prompt_path = write_prompts_to_json(list_prompt, output_folder)
+
+## Run Prompts 
+
+Run the prompts generated above by using your selected model. 
+
+We assume all responses are stored in a single JSON file with the `prompId: response` key-value paris. In the section below, we refer to this file path as `result_path`.
+
+An example of the results in the `result_path` file
+```
+{
+    "ICSI_aug_addTopics_w_topics_Bed004_variation_addToics_0_300_5": "THIS IS A RANDOM LIST [1, 3, 2, 0]",
+    "ICSI_aug_addTopics_w_topics_Bed009_variation_addToics_0_300_7": "THIS IS A RANDOM LIST [0, 0, 2, 1]",
+}
+```
+
+## Analyze the Results
+
+Depending on your prompts, the returned responses may have a different format. Overwrite the function `prompt_styles` to reflect how your responses are structured.
+
+In the process below, we assume that the response contains a list of scores that has the same length as the input topic list.
+
+# ========================================================================================================
+# Overwrite the following functions with your own implementation
+# ========================================================================================================
+
+def prompt_styles():
+    '''
+    Define the response parts and style examples for parsing responses.
+    Returns:
+        dict: A dictionary containing the response parts as keys and their types as values.
+        list or str: The style example(s) to be replaced in the responses.
+    '''
+    response_parts = {
+        'THIS IS A RANDOM LIST': 'list',
+    }
+    list_to_remove = ['']
+    return response_parts, list_to_remove
+
+# Get ground truth data
+df_gt = get_gt_data(prompt_path)
+fname = os.path.split(prompt_path)[-1].replace('.json', '')
+# Get Topic-Conversation Relevance results
+result_path = 'PATH_TO_YOUR_RESULTS_JSON_FILE'
+response_parts, list_to_remove = prompt_styles()
+all_responses = get_raw_completions(result_path)
+df_model, error_contents = parse_responses(all_responses, df_gt, list_to_remove, response_parts)
+if len(error_contents) > 0:
+    raise ValueError(f'To continue, handle the following error contents: {error_contents}')
+
+# Analyze the results
+df_all_join, list_buckets, threshold_pairs = join_results(df_gt, df_model, fname, output_folder)
+df_all_join['prompt_size'] = df_all_join['promptId'].str.split('_').str[-2]
+for psg, psdf in df_all_join.groupby('prompt_size'):
+    for b in list_buckets:
+        for p in threshold_pairs[b]:
+            ptitle = ' '.join(['\n', '='*10, 'Evaluation Results for {0} snippets; classification {1}; threshold {2}'.format(psg, b, p), '='*10])
+            metrics, metrics_binary = calculate_metrics(psdf, b, p)
+            display_metrics(metrics, metrics_binary, title=ptitle)
+
+"
+
+dry_run.py
+"import json 
+import os
+import sys
+
+import openai
+from utils.benchmark_utils import *
+import pandas as pd
+import numpy as np
+import tqdm
+import io
+from openai import OpenAI
+openai.api_key = "api_key"
+
+input_folder = 'data/example_aug'
+output_folder = "tmp/prompts"
+prep_folder(output_folder)
+meeting_files = [x for x in locate_suffix_files(input_folder, suffix="json")]
+meeting_files = meeting_files[:10]
+print(f"Found {len(meeting_files)} meeting files.")
+
+prompts = generate_relevance_prompts(meeting_files)
+prompt_path = write_prompts_to_json(prompts, output_folder)
+print(f"Prompts written to {prompt_path}")
+
+try:
+    with open(prompt_path, 'r') as f:
+        prompt_entries = [json.loads(line) for line in f]
+    print(f"Loaded {len(prompt_entries)} prompts.")
+except FileNotFoundError:
+    print(f"Error: Prompt file not found at {prompt_path}")
+    sys.exit(1)
+except json.JSONDecodeError:
+    print(f"Error: Could not decode JSON from {prompt_path}")
+    sys.exit(1)
+
+
+
+def run_prompts_openai(prompt_path, model="gpt-4o-mini"):
+    results = {}
+    for entry in prompt_entries:
+        prompt_id = entry.get('promptId', None) or entry.get('prompt_id', None) or str(len(results))
+        prompt_text = entry.get("prompt") or entry.get("text") or ""
+        
+        if not prompt_text:
+            print(f"Skipping empty prompt {prompt_id}")
+            continue
+        
+        response = openai.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": prompt_text}
+            ],
+            max_tokens=2048,
+            temperature=0.0
+        )
+        reply = response.choices[0].message.content
+        results[prompt_id] = reply
+    
+    result_path = os.path.join(output_folder, "results.json")
+    with open(result_path, 'w') as fout:
+        for pid, resp in results.items():
+            fout.write(json.dumps({"promptId": pid, "response": resp}) + "\n")
+    print(f"Results saved to {result_path}")
+    return result_path
+
+result_path = run_prompts_openai(prompt_path)
+"
